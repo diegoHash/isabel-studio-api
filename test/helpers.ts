@@ -1,26 +1,35 @@
 import { env } from "cloudflare:workers";
 import { vi } from "vitest";
 import app from "../src/index";
-import { hashPassword } from "../src/lib/crypto";
 
 export const ORIGIN = "https://sitio.test";
-export const PASSWORD = "clave-de-prueba-segura-123";
+export const ROOT_EMAIL = "root@sitio.test";
+export const FAKE_HASH = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQxMjM0NTY3OA$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g";
 /** Viernes 2026-11-20 10:00 en Bogotá (15:00 UTC). */
 export const NOW = new Date("2026-11-20T15:00:00Z");
 
-let passwordHash: string | undefined;
-
 export async function testEnv() {
-  passwordHash ??= await hashPassword(PASSWORD, 1000);
-  return { ...env, ADMIN_PASSWORD_HASH: passwordHash } as typeof env;
+  return env;
+}
+
+export async function seedUser(email: string, opts: { role?: "root" | "staff"; permissions?: string[]; active?: boolean; name?: string } = {}) {
+  const id = crypto.randomUUID();
+  const ts = new Date().toISOString();
+  await env.DB.prepare(
+    "INSERT INTO users (id, email, name, role, permissions, password_hash, active, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8)",
+  )
+    .bind(id, email, opts.name ?? email.split("@")[0], opts.role ?? "staff", JSON.stringify(opts.permissions ?? []), FAKE_HASH, opts.active === false ? 0 : 1, ts)
+    .run();
+  return id;
 }
 
 export async function resetDb() {
   await env.DB.batch(
-    ["appointments", "day_overrides", "slot_overrides", "settings", "sessions", "rate_limits"].map((t) =>
+    ["appointments", "day_overrides", "slot_overrides", "settings", "sessions", "rate_limits", "users"].map((t) =>
       env.DB.prepare(`DELETE FROM ${t}`),
     ),
   );
+  await seedUser(ROOT_EMAIL, { role: "root", name: "Diego" });
 }
 
 export function freezeTime(date: Date = NOW) {
@@ -63,8 +72,9 @@ export async function call(method: string, path: string, opts: CallOpts = {}) {
   return { status: res.status, headers: res.headers, json };
 }
 
-export async function login(ip = "203.0.113.50"): Promise<string> {
-  const res = await call("POST", "/api/admin/login", { body: { password: PASSWORD }, ip });
+/** Simula el login: el proxy de Vercel ya verificó Argon2 y manda el veredicto. */
+export async function login(email = ROOT_EMAIL, ip = "203.0.113.50"): Promise<string> {
+  const res = await call("POST", "/api/admin/login", { body: { email }, headers: { "x-admin-verified": "1" }, ip });
   if (res.status !== 200) throw new Error("login falló en test: " + JSON.stringify(res.json));
   const setCookie = res.headers.get("set-cookie") ?? "";
   return setCookie.split(";")[0]!;

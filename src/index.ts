@@ -3,6 +3,8 @@ import type { AppEnv } from "./env";
 import { HttpError } from "./lib/http";
 import { noStore, originGuard, proxyGuard, securityHeaders } from "./middleware/security";
 import { adminRoutes } from "./routes/admin";
+import { internalRoutes } from "./routes/internal";
+import { userRoutes } from "./routes/users";
 import { publicRoutes } from "./routes/public";
 
 const app = new Hono<AppEnv>();
@@ -13,7 +15,9 @@ app.use("/api/*", proxyGuard);
 app.use("/api/*", originGuard);
 
 app.route("/api", publicRoutes);
+app.route("/api/internal", internalRoutes);
 app.route("/api/admin", adminRoutes);
+app.route("/api/admin", userRoutes);
 
 app.notFound((c) => c.json({ error: { code: "not_found", message: "No encontrado" } }, 404));
 

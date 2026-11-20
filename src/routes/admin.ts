@@ -2,9 +2,9 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../env";
 import { createAppointment, toApi, type AppointmentRow } from "../lib/appointments";
-import { verifyPassword } from "../lib/crypto";
 import { HttpError, parseQuery, readJson } from "../lib/http";
 import { rateLimit } from "../lib/ratelimit";
+import { sha256Hex } from "../lib/crypto";
 import { loadRange, loadSettings, resolveRange, saveSettings } from "../lib/schedule";
 import { addDays, bogotaNow, diffDays, isValidDate, TIME_RE } from "../lib/time";
 import {
@@ -16,7 +16,7 @@ import {
   slotOverrideSchema,
   updateStatusSchema,
 } from "../lib/validation";
-import { createSession, destroySession, hasValidSession, requireAdmin } from "../middleware/auth";
+import { can, createSession, currentUser, destroySession, requireAdmin, requirePermission } from "../middleware/auth";
 
 export const adminRoutes = new Hono<AppEnv>();
 
@@ -36,19 +36,17 @@ adminRoutes.post("/login", async (c) => {
   ]);
   if (!perIp.ok || !global.ok) limited(perIp.ok ? global : perIp, "Demasiados intentos. Espera unos minutos.");
 
-  // En producción la clave (Argon2id) se verifica en el servidor de Vercel y aquí solo llega el veredicto.
-  // La cabecera solo la agrega el proxy autenticado (proxyGuard); el cliente nunca puede enviarla.
-  const verdict = c.req.header("x-admin-verified");
-  let ok: boolean;
-  if (verdict === "1" || verdict === "0") {
-    ok = verdict === "1";
-  } else {
-    const { password } = await readJson(c, loginSchema);
-    ok = await verifyPassword(password, c.env.ADMIN_PASSWORD_HASH);
-  }
-  if (!ok) throw new HttpError(401, "invalid_credentials", "Clave incorrecta");
+  // La clave (Argon2id) se verifica en el servidor de Vercel; aquí solo llega el veredicto.
+  // La cabecera la agrega únicamente el proxy autenticado: el cliente nunca puede enviarla.
+  const { email } = await readJson(c, loginSchema);
+  const perEmail = await rateLimit(c.env.DB, "login-email", email, 10, 3600);
+  if (!perEmail.ok) limited(perEmail, "Demasiados intentos para esta cuenta. Espera un rato.");
 
-  await createSession(c);
+  const verified = c.req.header("x-admin-verified") === "1";
+  const user = await c.env.DB.prepare("SELECT id FROM users WHERE email = ?1 AND active = 1").bind(email).first<{ id: string }>();
+  if (!verified || !user) throw new HttpError(401, "invalid_credentials", "Correo o clave incorrectos");
+
+  await createSession(c, user.id);
   return c.json({ ok: true });
 });
 
@@ -57,16 +55,15 @@ adminRoutes.post("/logout", async (c) => {
   return c.json({ ok: true });
 });
 
-adminRoutes.get("/me", async (c) => c.json({ authenticated: await hasValidSession(c) }));
-
-// Todo lo demás exige sesión.
-adminRoutes.use("*", async (c, next) => {
-  if (c.req.path.endsWith("/login") || c.req.path.endsWith("/logout") || c.req.path.endsWith("/me")) return next();
-  return requireAdmin(c, next);
+adminRoutes.get("/me", async (c) => {
+  const user = await currentUser(c);
+  return c.json(user ? { authenticated: true, user } : { authenticated: false });
 });
 
+// Todo lo demás exige sesión de un usuario activo.
+adminRoutes.use("*", requireAdmin);
+
 adminRoutes.use("*", async (c, next) => {
-  if (c.req.path.endsWith("/login")) return next();
   const rl = await rateLimit(c.env.DB, "admin", c.get("clientIp"), 300, 60);
   if (!rl.ok) limited(rl, "Demasiadas peticiones");
   return next();
@@ -74,7 +71,7 @@ adminRoutes.use("*", async (c, next) => {
 
 // ---------- Resumen ----------
 
-adminRoutes.get("/summary", async (c) => {
+adminRoutes.get("/summary", requirePermission("appointments"), async (c) => {
   const today = bogotaNow().date;
   const week = addDays(today, 7);
   const rows = await c.env.DB.batch<{ n: number }>([
@@ -96,7 +93,7 @@ const listQuery = z.object({
   q: z.string().max(80).optional(),
 });
 
-adminRoutes.get("/appointments", async (c) => {
+adminRoutes.get("/appointments", requirePermission("appointments"), async (c) => {
   const q = parseQuery(c, listQuery);
   const where: string[] = [];
   const binds: (string | number)[] = [];
@@ -113,13 +110,13 @@ adminRoutes.get("/appointments", async (c) => {
   return c.json({ appointments: res.results.map(toApi) });
 });
 
-adminRoutes.post("/appointments", async (c) => {
+adminRoutes.post("/appointments", requirePermission("appointments"), async (c) => {
   const body = await readJson(c, adminCreateAppointmentSchema);
   const row = await createAppointment(c.env.DB, body, { source: "admin" });
   return c.json({ appointment: toApi(row) }, 201);
 });
 
-adminRoutes.patch("/appointments/:id", async (c) => {
+adminRoutes.patch("/appointments/:id", requirePermission("appointments"), async (c) => {
   const id = c.req.param("id");
   if (!ID_RE.test(id)) throw new HttpError(404, "not_found", "Cita no encontrada");
   const { status } = await readJson(c, updateStatusSchema);
@@ -130,7 +127,7 @@ adminRoutes.patch("/appointments/:id", async (c) => {
   return c.json({ appointment: toApi(row) });
 });
 
-adminRoutes.delete("/appointments/:id", async (c) => {
+adminRoutes.delete("/appointments/:id", requirePermission("appointments"), async (c) => {
   const id = c.req.param("id");
   if (!ID_RE.test(id)) throw new HttpError(404, "not_found", "Cita no encontrada");
   const res = await c.env.DB.prepare("DELETE FROM appointments WHERE id = ?1").bind(id).run();
@@ -140,7 +137,7 @@ adminRoutes.delete("/appointments/:id", async (c) => {
 
 // ---------- Agenda ----------
 
-adminRoutes.get("/schedule", async (c) => {
+adminRoutes.get("/schedule", requirePermission("appointments", "schedule"), async (c) => {
   const q = parseQuery(c, rangeQuerySchema);
   if (q.to < q.from || diffDays(q.from, q.to) > 62) {
     throw new HttpError(400, "validation_error", "Rango de fechas inválido", { to: "Rango de fechas inválido" });
@@ -155,13 +152,15 @@ adminRoutes.get("/schedule", async (c) => {
     ...d,
     slots: d.slots.map((s) => {
       const a = byKey.get(`${d.date} ${s.time}`);
-      return a ? { ...s, appointment: toApi(a) } : s;
+      if (!a) return s;
+      // Sin permiso de citas solo se ve que la hora está ocupada, no los datos del cliente.
+      return can(c.get("user"), "appointments") ? { ...s, appointment: toApi(a) } : s;
     }),
   }));
   return c.json({ today: bogotaNow().date, settings, days });
 });
 
-adminRoutes.put("/days/:date", async (c) => {
+adminRoutes.put("/days/:date", requirePermission("schedule"), async (c) => {
   const date = c.req.param("date");
   if (!isValidDate(date)) throw new HttpError(400, "validation_error", "Fecha inválida");
   const { open, note } = await readJson(c, dayOverrideSchema);
@@ -176,14 +175,14 @@ adminRoutes.put("/days/:date", async (c) => {
   return c.json({ ok: true, pendingAppointmentsOnDay: affected });
 });
 
-adminRoutes.delete("/days/:date", async (c) => {
+adminRoutes.delete("/days/:date", requirePermission("schedule"), async (c) => {
   const date = c.req.param("date");
   if (!isValidDate(date)) throw new HttpError(400, "validation_error", "Fecha inválida");
   await c.env.DB.prepare("DELETE FROM day_overrides WHERE date = ?1").bind(date).run();
   return c.json({ ok: true });
 });
 
-adminRoutes.put("/slots/:date/:time", async (c) => {
+adminRoutes.put("/slots/:date/:time", requirePermission("schedule"), async (c) => {
   const { date, time } = c.req.param();
   if (!isValidDate(date) || !TIME_RE.test(time)) throw new HttpError(400, "validation_error", "Fecha u hora inválida");
   const { open } = await readJson(c, slotOverrideSchema);
@@ -195,7 +194,7 @@ adminRoutes.put("/slots/:date/:time", async (c) => {
   return c.json({ ok: true });
 });
 
-adminRoutes.delete("/slots/:date/:time", async (c) => {
+adminRoutes.delete("/slots/:date/:time", requirePermission("schedule"), async (c) => {
   const { date, time } = c.req.param();
   if (!isValidDate(date) || !TIME_RE.test(time)) throw new HttpError(400, "validation_error", "Fecha u hora inválida");
   await c.env.DB.prepare("DELETE FROM slot_overrides WHERE date = ?1 AND time = ?2").bind(date, time).run();
@@ -204,9 +203,9 @@ adminRoutes.delete("/slots/:date/:time", async (c) => {
 
 // ---------- Configuración general ----------
 
-adminRoutes.get("/settings", async (c) => c.json({ settings: await loadSettings(c.env.DB) }));
+adminRoutes.get("/settings", requirePermission("schedule"), async (c) => c.json({ settings: await loadSettings(c.env.DB) }));
 
-adminRoutes.put("/settings", async (c) => {
+adminRoutes.put("/settings", requirePermission("schedule"), async (c) => {
   const body = await readJson(c, settingsSchema);
   await saveSettings(c.env.DB, body);
   return c.json({ settings: body });

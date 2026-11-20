@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NOW, ORIGIN, call, freezeTime, login, resetDb, validBooking } from "./helpers";
+import { FAKE_HASH, NOW, ORIGIN, ROOT_EMAIL, call, freezeTime, login, resetDb, seedUser, validBooking } from "./helpers";
 
 beforeEach(async () => {
   await resetDb();
@@ -192,68 +192,202 @@ describe("reservas", () => {
 });
 
 describe("panel de administración: autenticación", () => {
+  const verified = { "x-admin-verified": "1" };
+  const denied = { "x-admin-verified": "0" };
+
   it("las rutas del panel exigen sesión", async () => {
-    for (const [m, p] of [["GET", "/api/admin/appointments"], ["GET", "/api/admin/summary"], ["GET", "/api/admin/settings"], ["PUT", "/api/admin/days/2026-11-24"]] as const) {
+    for (const [m, p] of [["GET", "/api/admin/appointments"], ["GET", "/api/admin/summary"], ["GET", "/api/admin/settings"], ["GET", "/api/admin/users"], ["PUT", "/api/admin/days/2026-11-24"]] as const) {
       expect((await call(m, p, m === "GET" ? {} : { body: { open: false } })).status).toBe(401);
     }
     expect((await call("GET", "/api/admin/me")).json).toEqual({ authenticated: false });
   });
 
-  it("rechaza clave incorrecta y la API no revela si hay usuario", async () => {
-    const res = await call("POST", "/api/admin/login", { body: { password: "mala" } });
+  it("rechaza clave incorrecta, correo inexistente y cuentas desactivadas con el mismo mensaje", async () => {
+    await seedUser("baja@sitio.test", { active: false });
+    const wrong = await call("POST", "/api/admin/login", { body: { email: ROOT_EMAIL }, headers: denied, ip: "192.0.2.1" });
+    const unknown = await call("POST", "/api/admin/login", { body: { email: "nadie@sitio.test" }, headers: verified, ip: "192.0.2.2" });
+    const inactive = await call("POST", "/api/admin/login", { body: { email: "baja@sitio.test" }, headers: verified, ip: "192.0.2.3" });
+    for (const r of [wrong, unknown, inactive]) {
+      expect(r.status).toBe(401);
+      expect(r.json.error.message).toBe("Correo o clave incorrectos");
+      expect(r.headers.get("set-cookie")).toBeNull();
+    }
+  });
+
+  it("sin veredicto del proxy no hay sesión", async () => {
+    const res = await call("POST", "/api/admin/login", { body: { email: ROOT_EMAIL } });
     expect(res.status).toBe(401);
-    expect(res.headers.get("set-cookie")).toBeNull();
   });
 
   it("bloquea fuerza bruta: 5 intentos por IP cada 15 minutos", async () => {
     for (let i = 0; i < 5; i++) {
-      expect((await call("POST", "/api/admin/login", { body: { password: "mala" + i }, ip: "192.0.2.9" })).status).toBe(401);
+      expect((await call("POST", "/api/admin/login", { body: { email: ROOT_EMAIL }, headers: denied, ip: "192.0.2.9" })).status).toBe(401);
     }
-    const blocked = await call("POST", "/api/admin/login", { body: { password: "otra" }, ip: "192.0.2.9" });
+    const blocked = await call("POST", "/api/admin/login", { body: { email: ROOT_EMAIL }, headers: verified, ip: "192.0.2.9" });
     expect(blocked.status).toBe(429);
     expect(blocked.headers.get("retry-after")).toBeTruthy();
   });
 
-  it("la cookie de sesión es HttpOnly, SameSite=Strict y la sesión se puede cerrar", async () => {
-    const res = await call("POST", "/api/admin/login", { body: { password: (await import("./helpers")).PASSWORD } });
+  it("bloquea fuerza bruta distribuida contra un mismo correo (10/hora)", async () => {
+    for (let i = 0; i < 10; i++) {
+      await call("POST", "/api/admin/login", { body: { email: "victima@sitio.test" }, headers: denied, ip: `198.51.100.${i + 1}` });
+    }
+    const res = await call("POST", "/api/admin/login", { body: { email: "victima@sitio.test" }, headers: denied, ip: "198.51.100.99" });
+    expect(res.status).toBe(429);
+  });
+
+  it("la cookie de sesión es HttpOnly, SameSite=Strict, y /me devuelve el usuario y sus permisos", async () => {
+    const res = await call("POST", "/api/admin/login", { body: { email: "ROOT@sitio.test " }, headers: verified });
     expect(res.status).toBe(200);
     const sc = res.headers.get("set-cookie")!;
     expect(sc).toMatch(/HttpOnly/i);
     expect(sc).toMatch(/SameSite=Strict/i);
     expect(sc).toMatch(/Max-Age=28800/);
     const cookie = sc.split(";")[0]!;
-    expect((await call("GET", "/api/admin/me", { cookie })).json).toEqual({ authenticated: true });
-    // el token no se guarda en claro
+    const me = (await call("GET", "/api/admin/me", { cookie })).json;
+    expect(me.authenticated).toBe(true);
+    expect(me.user).toMatchObject({ email: ROOT_EMAIL, role: "root", permissions: ["appointments", "schedule", "users"] });
+    expect(JSON.stringify(me)).not.toMatch(/argon|hash/i);
     const stored = await env.DB.prepare("SELECT token_hash FROM sessions").all<{ token_hash: string }>();
     expect(cookie).not.toContain(stored.results[0]!.token_hash);
     await call("POST", "/api/admin/logout", { cookie });
     expect((await call("GET", "/api/admin/summary", { cookie })).status).toBe(401);
   });
 
-  it("veredicto Argon2 del proxy: 1 abre sesión, 0 se rechaza y ambos cuentan para el rate limit", async () => {
-    const ok = await call("POST", "/api/admin/login", { body: {}, headers: { "x-admin-verified": "1" }, ip: "192.0.2.20" });
-    expect(ok.status).toBe(200);
-    expect(ok.headers.get("set-cookie")).toMatch(/HttpOnly/i);
-    for (let i = 0; i < 4; i++) {
-      expect((await call("POST", "/api/admin/login", { body: {}, headers: { "x-admin-verified": "0" }, ip: "192.0.2.21" })).status).toBe(401);
-    }
-    expect((await call("POST", "/api/admin/login", { body: {}, headers: { "x-admin-verified": "0" }, ip: "192.0.2.21" })).status).toBe(401);
-    expect((await call("POST", "/api/admin/login", { body: {}, headers: { "x-admin-verified": "1" }, ip: "192.0.2.21" })).status).toBe(429);
-  });
-
-  it("el veredicto no sirve sin el secreto del proxy", async () => {
-    const res = await call("POST", "/api/admin/login", { body: {}, headers: { "x-admin-verified": "1" }, secret: null });
+  it("login exige origen autorizado (CSRF)", async () => {
+    const res = await call("POST", "/api/admin/login", { body: { email: ROOT_EMAIL }, headers: verified, origin: "https://malicioso.example" });
     expect(res.status).toBe(403);
   });
 
-  it("login exige origen autorizado (CSRF)", async () => {
-    const res = await call("POST", "/api/admin/login", { body: { password: "x" }, origin: "https://malicioso.example" });
+  it("el veredicto no sirve sin el secreto del proxy", async () => {
+    const res = await call("POST", "/api/admin/login", { body: { email: ROOT_EMAIL }, headers: verified, secret: null });
     expect(res.status).toBe(403);
   });
 
   it("una cookie inventada no da acceso", async () => {
-    const res = await call("GET", "/api/admin/appointments", { cookie: "isabel_session=" + "a".repeat(64) });
-    expect(res.status).toBe(401);
+    expect((await call("GET", "/api/admin/appointments", { cookie: "isabel_session=" + "a".repeat(64) })).status).toBe(401);
+  });
+
+  it("las rutas internas (hash de clave) solo responden con el secreto del proxy", async () => {
+    expect((await call("GET", `/api/internal/credentials?email=${ROOT_EMAIL}`, { secret: null })).status).toBe(403);
+    const ok = await call("GET", `/api/internal/credentials?email=${ROOT_EMAIL}`);
+    expect(ok.json.hash).toBe(FAKE_HASH);
+    expect((await call("GET", "/api/internal/credentials?email=nadie@sitio.test")).json.hash).toBeNull();
+  });
+});
+
+describe("permisos y usuarios", () => {
+  const newUser = (over: Record<string, unknown> = {}) => ({
+    email: "ana@sitio.test",
+    name: "Ana Pérez",
+    permissions: ["appointments"],
+    passwordHash: FAKE_HASH,
+    ...over,
+  });
+
+  it("el root crea usuarios con permisos y el nuevo usuario puede entrar", async () => {
+    const root = await login();
+    const res = await call("POST", "/api/admin/users", { cookie: root, body: newUser() });
+    expect(res.status).toBe(201);
+    expect(res.json.user).toMatchObject({ email: "ana@sitio.test", role: "staff", permissions: ["appointments"], active: true });
+    expect(JSON.stringify(res.json)).not.toMatch(/argon/);
+    expect((await call("POST", "/api/admin/users", { cookie: root, body: newUser() })).status).toBe(409);
+    const ana = await login("ana@sitio.test", "203.0.113.60");
+    expect((await call("GET", "/api/admin/me", { cookie: ana })).json.user.permissions).toEqual(["appointments"]);
+  });
+
+  it("valida los datos del usuario (permiso, correo, hash)", async () => {
+    const root = await login();
+    for (const bad of [
+      { permissions: ["todo"] },
+      { email: "no-es-correo" },
+      { passwordHash: "texto-plano-123" },
+      { name: "" },
+    ]) {
+      expect((await call("POST", "/api/admin/users", { cookie: root, body: newUser(bad) })).status).toBe(400);
+    }
+    expect((await call("POST", "/api/admin/users", { cookie: root, body: { ...newUser(), role: "root" } })).status).toBe(400);
+  });
+
+  it("cada permiso abre solo lo suyo", async () => {
+    await seedUser("citas@sitio.test", { permissions: ["appointments"] });
+    await seedUser("horarios@sitio.test", { permissions: ["schedule"] });
+    await seedUser("nada@sitio.test", { permissions: [] });
+    const citas = await login("citas@sitio.test", "203.0.113.61");
+    const horarios = await login("horarios@sitio.test", "203.0.113.62");
+    const nada = await login("nada@sitio.test", "203.0.113.63");
+
+    expect((await call("GET", "/api/admin/appointments", { cookie: citas })).status).toBe(200);
+    expect((await call("PUT", "/api/admin/days/2026-11-24", { cookie: citas, body: { open: false } })).status).toBe(403);
+    expect((await call("GET", "/api/admin/settings", { cookie: citas })).status).toBe(403);
+    expect((await call("GET", "/api/admin/users", { cookie: citas })).status).toBe(403);
+
+    expect((await call("PUT", "/api/admin/days/2026-11-24", { cookie: horarios, body: { open: false } })).status).toBe(200);
+    expect((await call("GET", "/api/admin/appointments", { cookie: horarios })).status).toBe(403);
+    expect((await call("POST", "/api/admin/appointments", { cookie: horarios, body: validBooking() })).status).toBe(403);
+
+    for (const [m, p] of [["GET", "/api/admin/appointments"], ["GET", "/api/admin/schedule?from=2026-11-24&to=2026-11-24"], ["GET", "/api/admin/settings"], ["GET", "/api/admin/users"]] as const) {
+      expect((await call(m, p, { cookie: nada })).status).toBe(403);
+    }
+  });
+
+  it("sin permiso de citas, la agenda no revela datos de clientes", async () => {
+    await call("POST", "/api/appointments", { body: validBooking({ time: "09:00" }) });
+    await seedUser("horarios@sitio.test", { permissions: ["schedule"] });
+    const horarios = await login("horarios@sitio.test", "203.0.113.62");
+    const res = await call("GET", "/api/admin/schedule?from=2026-11-24&to=2026-11-24", { cookie: horarios });
+    const slot = res.json.days[0].slots.find((s: any) => s.time === "09:00");
+    expect(slot.state).toBe("booked");
+    expect(slot.appointment).toBeUndefined();
+    expect(JSON.stringify(res.json)).not.toContain("María");
+  });
+
+  it("anti-escalada: un gestor de usuarios no da 'users', no edita al root ni se auto-elimina", async () => {
+    const gestorId = await seedUser("gestor@sitio.test", { permissions: ["users", "appointments"] });
+    const gestor = await login("gestor@sitio.test", "203.0.113.64");
+    expect((await call("POST", "/api/admin/users", { cookie: gestor, body: newUser({ permissions: ["users"] }) })).status).toBe(403);
+    expect((await call("POST", "/api/admin/users", { cookie: gestor, body: newUser({ permissions: ["schedule"] }) })).status).toBe(403); // no tiene "schedule"
+    expect((await call("POST", "/api/admin/users", { cookie: gestor, body: newUser({ permissions: ["appointments"] }) })).status).toBe(201);
+
+    const rootId = (await env.DB.prepare("SELECT id FROM users WHERE role='root'").first<{ id: string }>())!.id;
+    expect((await call("PATCH", `/api/admin/users/${rootId}`, { cookie: gestor, body: { name: "Hack" } })).status).toBe(403);
+    expect((await call("DELETE", `/api/admin/users/${gestorId}`, { cookie: gestor })).status).toBe(400);
+    expect((await call("PATCH", `/api/admin/users/${gestorId}`, { cookie: gestor, body: { permissions: ["users", "appointments", "schedule"] } })).status).toBe(403);
+  });
+
+  it("el root está protegido: no se elimina, desactiva ni pierde permisos", async () => {
+    const root = await login();
+    const rootId = (await env.DB.prepare("SELECT id FROM users WHERE role='root'").first<{ id: string }>())!.id;
+    expect((await call("DELETE", `/api/admin/users/${rootId}`, { cookie: root })).status).toBe(400);
+    expect((await call("PATCH", `/api/admin/users/${rootId}`, { cookie: root, body: { active: false } })).status).toBe(400);
+    expect((await call("PATCH", `/api/admin/users/${rootId}`, { cookie: root, body: { permissions: [] } })).status).toBe(400);
+    expect((await call("GET", "/api/admin/summary", { cookie: root })).status).toBe(200);
+  });
+
+  it("desactivar, cambiar permisos o clave cierra las sesiones; eliminar borra al usuario", async () => {
+    const root = await login();
+    const id = await seedUser("temp@sitio.test", { permissions: ["appointments"] });
+    const temp = await login("temp@sitio.test", "203.0.113.65");
+    expect((await call("GET", "/api/admin/summary", { cookie: temp })).status).toBe(200);
+
+    // quitar el permiso surte efecto de inmediato
+    await call("PATCH", `/api/admin/users/${id}`, { cookie: root, body: { permissions: ["schedule"] } });
+    expect((await call("GET", "/api/admin/summary", { cookie: temp })).status).toBe(403);
+
+    await call("PATCH", `/api/admin/users/${id}`, { cookie: root, body: { active: false } });
+    expect((await call("GET", "/api/admin/summary", { cookie: temp })).status).toBe(401);
+    expect((await call("POST", "/api/admin/login", { body: { email: "temp@sitio.test" }, headers: { "x-admin-verified": "1" }, ip: "203.0.113.66" })).status).toBe(401);
+
+    await call("PATCH", `/api/admin/users/${id}`, { cookie: root, body: { active: true, passwordHash: FAKE_HASH } });
+    expect((await call("DELETE", `/api/admin/users/${id}`, { cookie: root })).status).toBe(200);
+    const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE email='temp@sitio.test'").first<{ n: number }>();
+    expect(left?.n).toBe(0);
+  });
+
+  it("cualquier usuario puede cambiar su propia clave (hash Argon2 válido)", async () => {
+    const ana = await (async () => { await seedUser("ana@sitio.test", { permissions: [] }); return login("ana@sitio.test", "203.0.113.67"); })();
+    expect((await call("PUT", "/api/admin/me/password", { cookie: ana, body: { passwordHash: "plano" } })).status).toBe(400);
+    expect((await call("PUT", "/api/admin/me/password", { cookie: ana, body: { passwordHash: FAKE_HASH } })).status).toBe(200);
   });
 });
 

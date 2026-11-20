@@ -10,6 +10,7 @@ por lo que el navegador nunca ve la URL ni las credenciales del backend.
 - Antelación mínima 1 h, ventana de reserva de 60 días, una cita por franja (índice único en D1 → sin dobles reservas).
 - Una cita puede incluir **varios servicios** (carrito); guarda el detalle y el total, y ocupa una sola hora.
 - Estados de cita: `pendiente` y `atendida`.
+- Usuarios del panel en D1: un **root** (no se puede borrar ni degradar) y usuarios con permisos `appointments`, `schedule` y `users`. Anti-escalada: solo el root da `users`.
 - El admin puede habilitar/deshabilitar días y horas puntuales (incluso abrir un domingo o una hora extra).
 
 ## Seguridad
@@ -38,7 +39,7 @@ npm run typecheck
 npx wrangler login
 npx wrangler d1 create isabel-studio           # copia database_id a wrangler.jsonc
 npm run db:migrate:remote
-npx wrangler secret put ADMIN_PASSWORD_HASH     # salida de npm run hash-password
+# El primer usuario (root) se inserta una vez en la tabla users con un hash Argon2id (ver README del PWA).
 npx wrangler secret put PROXY_SECRET            # openssl rand -hex 32 (el mismo valor va en Vercel)
 # En wrangler.jsonc ajusta ALLOWED_ORIGINS con la URL final de Vercel
 npm run deploy

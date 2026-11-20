@@ -76,9 +76,44 @@ export const createAppointmentSchema = z.strictObject({
 
 export const adminCreateAppointmentSchema = createAppointmentSchema.omit({ website: true });
 
-export const loginSchema = z.strictObject({
-  password: z.string().min(1).max(200),
+export const emailField = z
+  .string({ error: "Escribe el correo" })
+  .transform((v) => v.trim().toLowerCase())
+  .pipe(z.email("Correo inválido").max(120, "Correo demasiado largo"));
+
+/** El proxy de Vercel verifica la clave (Argon2id) y aquí solo llega el correo. */
+export const loginSchema = z.strictObject({ email: emailField });
+
+const argonHash = z
+  .string()
+  .max(300)
+  .regex(/^\$argon2id\$v=19\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+$/, "Hash de clave inválido");
+
+const permissionsField = z
+  .array(z.enum(["appointments", "schedule", "users"], { error: "Permiso inválido" }))
+  .max(3)
+  .transform((a) => [...new Set(a)].sort());
+
+const userName = z
+  .string({ error: "Escribe el nombre" })
+  .transform(cleanText)
+  .pipe(z.string().min(2, "Escribe el nombre").max(60, "Nombre demasiado largo"));
+
+export const createUserSchema = z.strictObject({
+  email: emailField,
+  name: userName,
+  permissions: permissionsField,
+  passwordHash: argonHash,
 });
+
+export const updateUserSchema = z.strictObject({
+  name: userName.optional(),
+  permissions: permissionsField.optional(),
+  active: z.boolean().optional(),
+  passwordHash: argonHash.optional(),
+});
+
+export const selfPasswordSchema = z.strictObject({ passwordHash: argonHash });
 
 export const updateStatusSchema = z.strictObject({
   status: z.enum(["pendiente", "atendida"]),
