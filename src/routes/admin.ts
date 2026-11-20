@@ -36,8 +36,16 @@ adminRoutes.post("/login", async (c) => {
   ]);
   if (!perIp.ok || !global.ok) limited(perIp.ok ? global : perIp, "Demasiados intentos. Espera unos minutos.");
 
-  const { password } = await readJson(c, loginSchema);
-  const ok = await verifyPassword(password, c.env.ADMIN_PASSWORD_HASH);
+  // En producción la clave (Argon2id) se verifica en el servidor de Vercel y aquí solo llega el veredicto.
+  // La cabecera solo la agrega el proxy autenticado (proxyGuard); el cliente nunca puede enviarla.
+  const verdict = c.req.header("x-admin-verified");
+  let ok: boolean;
+  if (verdict === "1" || verdict === "0") {
+    ok = verdict === "1";
+  } else {
+    const { password } = await readJson(c, loginSchema);
+    ok = await verifyPassword(password, c.env.ADMIN_PASSWORD_HASH);
+  }
   if (!ok) throw new HttpError(401, "invalid_credentials", "Clave incorrecta");
 
   await createSession(c);

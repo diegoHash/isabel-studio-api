@@ -230,6 +230,22 @@ describe("panel de administración: autenticación", () => {
     expect((await call("GET", "/api/admin/summary", { cookie })).status).toBe(401);
   });
 
+  it("veredicto Argon2 del proxy: 1 abre sesión, 0 se rechaza y ambos cuentan para el rate limit", async () => {
+    const ok = await call("POST", "/api/admin/login", { body: {}, headers: { "x-admin-verified": "1" }, ip: "192.0.2.20" });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("set-cookie")).toMatch(/HttpOnly/i);
+    for (let i = 0; i < 4; i++) {
+      expect((await call("POST", "/api/admin/login", { body: {}, headers: { "x-admin-verified": "0" }, ip: "192.0.2.21" })).status).toBe(401);
+    }
+    expect((await call("POST", "/api/admin/login", { body: {}, headers: { "x-admin-verified": "0" }, ip: "192.0.2.21" })).status).toBe(401);
+    expect((await call("POST", "/api/admin/login", { body: {}, headers: { "x-admin-verified": "1" }, ip: "192.0.2.21" })).status).toBe(429);
+  });
+
+  it("el veredicto no sirve sin el secreto del proxy", async () => {
+    const res = await call("POST", "/api/admin/login", { body: {}, headers: { "x-admin-verified": "1" }, secret: null });
+    expect(res.status).toBe(403);
+  });
+
   it("login exige origen autorizado (CSRF)", async () => {
     const res = await call("POST", "/api/admin/login", { body: { password: "x" }, origin: "https://malicioso.example" });
     expect(res.status).toBe(403);

@@ -36,6 +36,7 @@ interface CallOpts {
   secret?: string | null;
   ip?: string;
   contentType?: string | null;
+  headers?: Record<string, string>;
 }
 
 export async function call(method: string, path: string, opts: CallOpts = {}) {
@@ -44,6 +45,7 @@ export async function call(method: string, path: string, opts: CallOpts = {}) {
   headers["x-client-ip"] = opts.ip ?? "203.0.113.7";
   if (opts.origin !== null && method !== "GET") headers["origin"] = opts.origin ?? ORIGIN;
   if (opts.cookie) headers["cookie"] = opts.cookie;
+  Object.assign(headers, opts.headers);
   const hasBody = opts.body !== undefined || opts.rawBody !== undefined;
   if (hasBody && opts.contentType !== null) headers["content-type"] = opts.contentType ?? "application/json";
   const res = await app.request(
