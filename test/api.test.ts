@@ -91,6 +91,21 @@ describe("reservas", () => {
     expect(av.json.days[0].slots).not.toContain("10:00");
   });
 
+  it("el carrito: varios servicios en una cita, con total y sin duplicados", async () => {
+    const res = await call("POST", "/api/appointments", {
+      body: validBooking({ serviceIds: ["manicure-semipermanente", "pedicure-semipermanente", "manicure-semipermanente", "keratina"] }),
+    });
+    expect(res.status).toBe(201);
+    const a = res.json.appointment;
+    expect(a.services.map((s: any) => s.id)).toEqual(["manicure-semipermanente", "pedicure-semipermanente", "keratina"]);
+    expect(a.total).toBe(88000); // 48.000 + 40.000 (keratina se cotiza)
+    expect(a.hasQuote).toBe(true);
+    expect(a.service).toBe("Manicure semipermanente + Pedicure semipermanente + Aplicación de keratina");
+    const cookie = await login();
+    const list = await call("GET", "/api/admin/appointments?q=pedicure", { cookie });
+    expect(list.json.appointments[0].total).toBe(88000);
+  });
+
   it("evita la doble reserva de la misma hora", async () => {
     expect((await call("POST", "/api/appointments", { body: validBooking() })).status).toBe(201);
     const dup = await call("POST", "/api/appointments", { body: validBooking({ name: "Otra Persona", phone: "3101234567" }), ip: "198.51.100.1" });
@@ -230,7 +245,7 @@ describe("panel de administración: citas", () => {
   it("lista, filtra, cambia estado y elimina citas", async () => {
     const cookie = await login();
     await call("POST", "/api/appointments", { body: validBooking({ time: "09:00", name: "Ana Torres", phone: "3001112233" }), ip: "198.51.100.1" });
-    await call("POST", "/api/appointments", { body: validBooking({ date: "2026-11-25", time: "10:00", serviceId: "sistema-acrilico" }), ip: "198.51.100.2" });
+    await call("POST", "/api/appointments", { body: validBooking({ date: "2026-11-25", time: "10:00", serviceIds: ["sistema-acrilico"] }), ip: "198.51.100.2" });
 
     const all = await call("GET", "/api/admin/appointments", { cookie });
     expect(all.json.appointments.map((a: any) => `${a.date} ${a.time}`)).toEqual(["2026-11-24 09:00", "2026-11-25 10:00"]);

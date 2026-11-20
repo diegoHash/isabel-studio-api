@@ -5,7 +5,7 @@ import { findService } from "./services";
 import { bogotaNow } from "./time";
 
 export interface AppointmentInput {
-  serviceId: string;
+  serviceIds: string[];
   date: string;
   time: string;
   name: string;
@@ -18,6 +18,8 @@ export interface AppointmentRow {
   id: string;
   service_id: string;
   service_name: string;
+  services_json: string | null;
+  total: number;
   client_name: string;
   phone: string;
   email: string | null;
@@ -32,11 +34,31 @@ export interface AppointmentRow {
 
 export const MAX_PENDING_PER_PHONE = 3;
 
+export interface ApptService {
+  id: string;
+  name: string;
+  price: number | null;
+}
+
+function parseServices(r: AppointmentRow): ApptService[] {
+  try {
+    const parsed = r.services_json ? JSON.parse(r.services_json) : null;
+    if (Array.isArray(parsed)) return parsed;
+  } catch {
+    /* se usa el respaldo */
+  }
+  return [{ id: r.service_id, name: r.service_name, price: null }];
+}
+
 export function toApi(r: AppointmentRow) {
+  const services = parseServices(r);
   return {
     id: r.id,
     serviceId: r.service_id,
     service: r.service_name,
+    services,
+    total: r.total,
+    hasQuote: services.some((s) => s.price === null),
     name: r.client_name,
     phone: r.phone,
     email: r.email,
@@ -61,8 +83,13 @@ export async function createAppointment(
 ): Promise<AppointmentRow> {
   const now = opts.now ?? new Date();
   const isAdmin = opts.source === "admin";
-  const service = findService(input.serviceId);
-  if (!service) throw new HttpError(400, "validation_error", "Servicio inválido", { serviceId: "Elige un servicio" });
+  const services = input.serviceIds.map((id) => findService(id));
+  if (services.length === 0 || services.some((s) => !s)) {
+    throw new HttpError(400, "validation_error", "Servicio inválido", { serviceIds: "Elige al menos un servicio" });
+  }
+  const chosen = services as NonNullable<(typeof services)[number]>[];
+  const summary: ApptService[] = chosen.map((s) => ({ id: s.id, name: s.name, price: s.price }));
+  const total = summary.reduce((sum, s) => sum + (s.price ?? 0), 0);
 
   if (!isAdmin && !isWithinBookingWindow(input.date, now)) {
     const w = bookingWindow(now);
@@ -104,8 +131,10 @@ export async function createAppointment(
   const ts = new Date().toISOString();
   const row: AppointmentRow = {
     id: randomId(),
-    service_id: service.id,
-    service_name: service.name,
+    service_id: chosen[0]!.id,
+    service_name: chosen.map((s) => s.name).join(" + "),
+    services_json: JSON.stringify(summary),
+    total,
     client_name: input.name,
     phone: input.phone,
     email: input.email,
@@ -121,10 +150,10 @@ export async function createAppointment(
   try {
     await db
       .prepare(
-        `INSERT INTO appointments (id, service_id, service_name, client_name, phone, email, notes, date, time, status, source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
+        `INSERT INTO appointments (id, service_id, service_name, services_json, total, client_name, phone, email, notes, date, time, status, source, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
       )
-      .bind(row.id, row.service_id, row.service_name, row.client_name, row.phone, row.email, row.notes, row.date, row.time, row.status, row.source, row.created_at, row.updated_at)
+      .bind(row.id, row.service_id, row.service_name, row.services_json, row.total, row.client_name, row.phone, row.email, row.notes, row.date, row.time, row.status, row.source, row.created_at, row.updated_at)
       .run();
   } catch (err) {
     if (String((err as Error)?.message ?? err).includes("UNIQUE")) {

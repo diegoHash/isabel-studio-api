@@ -59,7 +59,11 @@ const optionalNotes = z
   .transform((v) => v ?? null);
 
 export const createAppointmentSchema = z.strictObject({
-  serviceId: z.enum(serviceIds, { error: "Elige un servicio" }),
+  serviceIds: z
+    .array(z.enum(serviceIds, { error: "Servicio inválido" }), { error: "Elige al menos un servicio" })
+    .min(1, "Elige al menos un servicio")
+    .max(8, "Máximo 8 servicios por cita")
+    .transform((ids) => [...new Set(ids)]),
   date: dateField,
   time: timeField,
   name: nameField,

@@ -8,6 +8,7 @@ por lo que el navegador nunca ve la URL ni las credenciales del backend.
 - Zona horaria **America/Bogota**. Trabaja **lunes a sábado**; domingos y **festivos de Colombia** (calculados, Ley Emiliani) cerrados.
 - Horas base: 8, 9, 10, 11, 13, 14, 15, 16 y 17 h (configurables desde el panel).
 - Antelación mínima 1 h, ventana de reserva de 60 días, una cita por franja (índice único en D1 → sin dobles reservas).
+- Una cita puede incluir **varios servicios** (carrito); guarda el detalle y el total, y ocupa una sola hora.
 - Estados de cita: `pendiente` y `atendida`.
 - El admin puede habilitar/deshabilitar días y horas puntuales (incluso abrir un domingo o una hora extra).
 

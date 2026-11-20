@@ -69,7 +69,7 @@ export async function login(ip = "203.0.113.50"): Promise<string> {
 }
 
 export const validBooking = (over: Record<string, unknown> = {}) => ({
-  serviceId: "manicure-semipermanente",
+  serviceIds: ["manicure-semipermanente"],
   date: "2026-11-24", // martes
   time: "10:00",
   name: "María Fernanda López",

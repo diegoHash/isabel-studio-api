@@ -108,7 +108,7 @@ describe("validación", () => {
   it("limpia texto peligroso", () => {
     expect(cleanText("  hola <script>alert(1)</script>\u0000  mundo ")).toBe("hola scriptalert(1)/script mundo");
   });
-  const base = { serviceId: "trenzas", date: "2026-11-24", time: "10:00", name: "Ana Pérez", phone: "3206690456" };
+  const base = { serviceIds: ["trenzas"], date: "2026-11-24", time: "10:00", name: "Ana Pérez", phone: "3206690456" };
   it("acepta una reserva válida", () => {
     const r = createAppointmentSchema.safeParse(base);
     expect(r.success).toBe(true);
@@ -121,7 +121,9 @@ describe("validación", () => {
     ["celular inválido", { phone: "1234567" }],
     ["fijo (no móvil)", { phone: "6012345678" }],
     ["correo inválido", { email: "no-es-correo" }],
-    ["servicio inexistente", { serviceId: "x" }],
+    ["servicio inexistente", { serviceIds: ["x"] }],
+    ["sin servicios", { serviceIds: [] }],
+    ["demasiados servicios", { serviceIds: Array(9).fill("trenzas") }],
     ["fecha imposible", { date: "2026-02-30" }],
     ["hora inválida", { time: "25:00" }],
     ["notas muy largas", { notes: "a".repeat(301) }],
