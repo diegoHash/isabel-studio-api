@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "isabel-studio-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "isabel-studio",
+      // Reemplaza por el ID real que devuelve `wrangler d1 create isabel-studio`.
+      // El ID no es un secreto, pero se mantiene fuera de las credenciales.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production",
+    // Orígenes del sitio (Vercel) autorizados a hacer peticiones que modifican datos (anti-CSRF).
+    "ALLOWED_ORIGINS": "https://isabel-studio-pwa.vercel.app"
+  }
+  // SECRETOS (nunca en el repo): se cargan con `wrangler secret put <NOMBRE>`
+  //   ADMIN_PASSWORD_HASH  -> salida de `npm run hash-password`
+  //   PROXY_SECRET         -> cadena aleatoria compartida con el proxy de Vercel
+}
