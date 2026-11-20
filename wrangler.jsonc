@@ -12,7 +12,7 @@
       "database_name": "isabel-studio",
       // Reemplaza por el ID real que devuelve `wrangler d1 create isabel-studio`.
       // El ID no es un secreto, pero se mantiene fuera de las credenciales.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "9eb0b306-3da2-41a1-a7b2-3844667d770f",
       "migrations_dir": "migrations"
     }
   ],
