@@ -16,7 +16,7 @@ import {
   slotOverrideSchema,
   updateStatusSchema,
 } from "../lib/validation";
-import { can, createSession, currentUser, destroySession, requireAdmin, requirePermission } from "../middleware/auth";
+import { can, createSession, currentUser, destroySession, isPublished, requireAdmin, requirePermission, requireRoot } from "../middleware/auth";
 
 export const adminRoutes = new Hono<AppEnv>();
 
@@ -43,8 +43,13 @@ adminRoutes.post("/login", async (c) => {
   if (!perEmail.ok) limited(perEmail, "Demasiados intentos para esta cuenta. Espera un rato.");
 
   const verified = c.req.header("x-admin-verified") === "1";
-  const user = await c.env.DB.prepare("SELECT id FROM users WHERE email = ?1 AND active = 1").bind(email).first<{ id: string }>();
+  const user = await c.env.DB.prepare("SELECT id, role FROM users WHERE email = ?1 AND active = 1").bind(email).first<{ id: string; role: string }>();
   if (!verified || !user) throw new HttpError(401, "invalid_credentials", "Correo o clave incorrectos");
+
+  // Versión maqueta: solo el administrador principal entra. Se revela únicamente con clave correcta.
+  if (user.role !== "root" && !(await isPublished(c.env.DB))) {
+    throw new HttpError(403, "not_published", "El panel estará disponible para tu usuario cuando se publique la versión de producción.");
+  }
 
   await createSession(c, user.id);
   return c.json({ ok: true });
@@ -67,6 +72,20 @@ adminRoutes.use("*", async (c, next) => {
   const rl = await rateLimit(c.env.DB, "admin", c.get("clientIp"), 300, 60);
   if (!rl.ok) limited(rl, "Demasiadas peticiones");
   return next();
+});
+
+// ---------- Publicación (solo root) ----------
+
+adminRoutes.get("/publish", requireRoot, async (c) => c.json({ published: await isPublished(c.env.DB) }));
+
+adminRoutes.put("/publish", requireRoot, async (c) => {
+  const { published } = await readJson(c, z.strictObject({ published: z.boolean() }));
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO settings (key, value) VALUES ('published', ?1) ON CONFLICT(key) DO UPDATE SET value = ?1").bind(published ? "1" : "0"),
+    // Al volver a modo maqueta se cierran las sesiones de todos los que no son root.
+    ...(published ? [] : [c.env.DB.prepare("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE role != 'root')")]),
+  ]);
+  return c.json({ published });
 });
 
 // ---------- Resumen ----------

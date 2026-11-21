@@ -68,7 +68,8 @@ export async function currentUser(c: Context<AppEnv>): Promise<AuthUser | null> 
   const row = await c.env.DB.prepare(
     `SELECT u.id, u.email, u.name, u.role, u.permissions
        FROM sessions s JOIN users u ON u.id = s.user_id
-      WHERE s.token_hash = ?1 AND s.expires_at > ?2 AND u.active = 1`,
+      WHERE s.token_hash = ?1 AND s.expires_at > ?2 AND u.active = 1
+        AND (u.role = 'root' OR (SELECT value FROM settings WHERE key = 'published') = '1')`,
   )
     .bind(await sha256Hex(token), Date.now())
     .first<UserRow>();
@@ -93,5 +94,16 @@ export const requirePermission =
     }
     return next();
   };
+
+/** Solo el administrador principal. */
+export const requireRoot: MiddlewareHandler<AppEnv> = async (c, next) => {
+  if (c.get("user").role !== "root") throw new HttpError(403, "forbidden", "Solo el administrador principal puede hacer esto");
+  return next();
+};
+
+export async function isPublished(db: D1Database): Promise<boolean> {
+  const row = await db.prepare("SELECT value FROM settings WHERE key = 'published'").first<{ value: string }>();
+  return row?.value === "1";
+}
 
 export const can = (user: AuthUser, perm: Permission) => user.role === "root" || user.permissions.includes(perm);

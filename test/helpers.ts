@@ -90,3 +90,7 @@ export const validBooking = (over: Record<string, unknown> = {}) => ({
   notes: "Diseño francés",
   ...over,
 });
+
+export async function setPublished(value: boolean) {
+  await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('published', ?1) ON CONFLICT(key) DO UPDATE SET value = ?1").bind(value ? "1" : "0").run();
+}

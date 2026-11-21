@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FAKE_HASH, NOW, ORIGIN, ROOT_EMAIL, call, freezeTime, login, resetDb, seedUser, validBooking } from "./helpers";
+import { FAKE_HASH, NOW, ORIGIN, ROOT_EMAIL, call, freezeTime, login, resetDb, seedUser, setPublished, validBooking } from "./helpers";
 
 beforeEach(async () => {
   await resetDb();
@@ -276,7 +276,50 @@ describe("panel de administración: autenticación", () => {
   });
 });
 
+describe("versión maqueta: solo el root entra hasta publicar", () => {
+  const verified = { "x-admin-verified": "1" };
+
+  it("un usuario no-root queda bloqueado en login mientras no se publique", async () => {
+    await seedUser("ana@sitio.test", { permissions: ["appointments"] });
+    const res = await call("POST", "/api/admin/login", { body: { email: "ana@sitio.test" }, headers: verified, ip: "203.0.113.70" });
+    expect(res.status).toBe(403);
+    expect(res.json.error.code).toBe("not_published");
+    expect(res.headers.get("set-cookie")).toBeNull();
+    // con clave incorrecta no se revela nada: sigue siendo 401
+    const bad = await call("POST", "/api/admin/login", { body: { email: "ana@sitio.test" }, headers: { "x-admin-verified": "0" }, ip: "203.0.113.71" });
+    expect(bad.status).toBe(401);
+    // el root sí entra
+    expect((await call("POST", "/api/admin/login", { body: { email: ROOT_EMAIL }, headers: verified, ip: "203.0.113.72" })).status).toBe(200);
+  });
+
+  it("el estado público refleja si está publicado", async () => {
+    expect((await call("GET", "/api/status")).json).toEqual({ published: false });
+    await setPublished(true);
+    expect((await call("GET", "/api/status")).json).toEqual({ published: true });
+  });
+
+  it("solo el root publica; al publicar el usuario entra y al despublicar pierde la sesión", async () => {
+    await seedUser("ana@sitio.test", { permissions: ["appointments", "users"] });
+    const root = await login();
+    expect((await call("GET", "/api/admin/publish", { cookie: root })).json).toEqual({ published: false });
+    expect((await call("PUT", "/api/admin/publish", { cookie: root, body: { published: "si" } })).status).toBe(400);
+    expect((await call("PUT", "/api/admin/publish", { cookie: root, body: { published: true } })).json).toEqual({ published: true });
+
+    const ana = await login("ana@sitio.test", "203.0.113.73");
+    expect((await call("GET", "/api/admin/summary", { cookie: ana })).status).toBe(200);
+    // ni siquiera con permiso de usuarios puede publicar
+    expect((await call("PUT", "/api/admin/publish", { cookie: ana, body: { published: false } })).status).toBe(403);
+    expect((await call("GET", "/api/admin/publish", { cookie: ana })).status).toBe(403);
+
+    await call("PUT", "/api/admin/publish", { cookie: root, body: { published: false } });
+    expect((await call("GET", "/api/admin/summary", { cookie: ana })).status).toBe(401);
+    expect((await call("GET", "/api/admin/summary", { cookie: root })).status).toBe(200);
+  });
+});
+
 describe("permisos y usuarios", () => {
+  beforeEach(() => setPublished(true));
+
   const newUser = (over: Record<string, unknown> = {}) => ({
     email: "ana@sitio.test",
     name: "Ana Pérez",

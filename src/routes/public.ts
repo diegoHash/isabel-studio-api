@@ -3,6 +3,7 @@ import type { AppEnv } from "../env";
 import { createAppointment, toApi } from "../lib/appointments";
 import { HttpError, parseQuery, readJson } from "../lib/http";
 import { rateLimit } from "../lib/ratelimit";
+import { isPublished } from "../middleware/auth";
 import { bookingWindow, loadRange, loadSettings, resolveRange } from "../lib/schedule";
 import { SERVICES } from "../lib/services";
 import { TIMEZONE, diffDays } from "../lib/time";
@@ -11,6 +12,9 @@ import { createAppointmentSchema, rangeQuerySchema } from "../lib/validation";
 export const publicRoutes = new Hono<AppEnv>();
 
 publicRoutes.get("/health", (c) => c.json({ ok: true }));
+
+/** Estado de publicación: el sitio muestra la marca de agua "Maqueta" mientras sea false. */
+publicRoutes.get("/status", async (c) => c.json({ published: await isPublished(c.env.DB) }));
 
 publicRoutes.get("/services", (c) => c.json({ services: SERVICES }));
 
